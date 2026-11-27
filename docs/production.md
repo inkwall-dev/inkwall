@@ -180,8 +180,9 @@ rules behind each rate, are in the
   [InkwallEvaluationSlotsSaturated](monitoring.md#inkwallevaluationslotssaturated),
   [InkwallAdapterErrors](monitoring.md#inkwalladaptererrors),
   [InkwallEnginesBehind](monitoring.md#inkwallenginesbehind),
-  [InkwallWiringFailures](monitoring.md#inkwallwiringfailures) and
-  [InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit).
+  [InkwallWiringFailures](monitoring.md#inkwallwiringfailures),
+  [InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit) and
+  [InkwallBundleChangesHeld](monitoring.md#inkwallbundlechangesheld).
 - [ ] **Serve the operator's metrics over HTTPS** with `metrics.secure.enabled`
   ([Metrics over HTTPS](monitoring.md#metrics-over-https)).
 
@@ -227,6 +228,34 @@ The operator's design targets (0004 §8), measured by `make scale-test SCALE=ful
 | Bundle, compressed | 900 KiB in one Secret, 7,200 KiB in chunks | 134 KiB at 5,000 policies |
 
 A cluster near these numbers should raise `operator.resources.limits.memory`. The bundle is the
-hard limit: past 7,200 KiB compressed, policy changes are refused (`BundleTooLarge`), and
-[InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit) fires at 80%. The details
-are in [0004 §8](design/0004-operator.md#8-scale-targets-v1).
+hard limit: past 7,200 KiB compressed or 64 MiB raw, changes are held back namespace by namespace,
+the namespace with the largest share of the bundle first (`BundleTooLarge`), while the others are
+published. Once the bundle with every change would leave less than `spec.bundle.namespaceShare`
+(25% by default) of a limit free, one namespace's changes that would take its measured share over
+that share of the limit are held too, so the last share of the bundle stays for the others (content
+it published before stays). While more room is free, one namespace may grow past its share, up to
+that room: it is held only once the room left is less than a share, and what it published then
+stays, so a later change of the others, a CRS upgrade too, may not fit. A cluster with one
+namespace, and a first bundle that fits, are never held by it. A namespace's share leaves out
+ClusterWAFRuleSets and the CRS, whoever binds them. Raise it for a cluster with few, large
+namespaces. A tenant with several namespaces has a share in each, so it can take more than one
+share in all. [InkwallNamespaceOverShare](monitoring.md#inkwallnamespaceovershare) fires while a
+namespace is over its share. `spec.bundle.clusterReserve` (10% of each limit by default, 0 to 50)
+is kept for ClusterWAFRuleSet changes, such as a CRS upgrade: namespaces' changes that would grow
+the bundle into it are held, while cluster rule set changes may use it, so tenants can't fill the
+room an upgrade needs. It never applies to one namespace, or to a first bundle; set it to 0 to give
+the namespaces that room. When a CRS upgrade adds a rule id a tenant's published rules use, the
+tenant's fix shipped with it is published before other namespaces' changes and may use 4% of each
+limit from the reserve (all such fixes together, in that build), as long as it fits the size limits
+with the upgrade and grows the namespace's share by at most 4% of each limit: a rule id or rule fix
+takes a few bytes. A fix that doesn't fit is held, and the tenant's published policy is left out. A
+change that grows the share by more is ballast, not the fix: it gets no priority and may not use the
+reserve, and the upgrade waits one build for it, after which the tenant's published policy is left
+out if it still doesn't fit. The upgrade waits at most one build, and only for such changes that
+don't all fit (the smallest first); the fixes that wait are released first in the next build and
+share another 4% of each limit, so an upgrade's fixes take at most 8% of the reserve (and at most
+half of it). So a fix that grows the share by more than 4%, shipped with an upgrade into a bundle
+without that much room above the reserve, can leave the tenant's policy out. Ship the minimal fix
+(the rule id or rule the upgrade breaks) before the upgrade, or apart from a larger rewrite.
+[InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit) fires at 80%. The details are
+in [0004 §8](design/0004-operator.md#8-scale-targets-v1).

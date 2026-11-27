@@ -21,6 +21,8 @@ do when an alert fires.
   - [InkwallEnginesBehind](#inkwallenginesbehind)
   - [InkwallWiringFailures](#inkwallwiringfailures)
   - [InkwallBundleNearSizeLimit](#inkwallbundlenearsizelimit)
+  - [InkwallBundleChangesHeld](#inkwallbundlechangesheld)
+  - [InkwallNamespaceOverShare](#inkwallnamespaceovershare)
 - [Checking it worked](#checking-it-worked)
 - [Turning it off](#turning-it-off)
 
@@ -197,7 +199,8 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `inkwall_operator_bundle_version` | gauge | | The bundle this replica serves. |
-| `inkwall_operator_bundle_compressed_bytes` | gauge | | Its size, gzip-compressed: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published. |
+| `inkwall_operator_bundle_compressed_bytes` | gauge | | Its size, gzip-compressed: over 900 KiB it is split into chunks; it is never over 7,200 KiB (see `inkwall_operator_bundle_held_policies`). |
+| `inkwall_operator_bundle_raw_bytes` | gauge | | Its size, signed and decompressed: it is never over 64 MiB. |
 | `inkwall_operator_geo_table_compressed_bytes` | gauge | | Size of the country table the served bundle names (geo blocking), gzip-compressed; 0 without one. |
 | `inkwall_operator_geo_tables_sent_total` | counter | | Country tables this replica sent to engines. |
 | `inkwall_operator_engines` | gauge | `state`, `integration` | Connected engines by whether they run the current bundle (`current`, `behind`, `rejected`), and by the integration whose proxy pod runs them (`unknown` until matched to one). Leader only. |
@@ -209,7 +212,9 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | `inkwall_operator_policies` | gauge | `condition`, `status`, `reason` | WAFPolicies by each condition (`Accepted`, `Programmed`, `Enforced`, `Ready`), its status and reason. Leader only. |
 | `inkwall_operator_signing_key_age_seconds` | gauge | | Time since the active bundle signing key began to sign. Leader only. |
 | `inkwall_operator_signing_key_rotation_phase` | gauge | `phase` | 1 for the rotation's phase (`Idle`, `Publishing`, `Retiring`), 0 for the others. Leader only. |
-| `inkwall_operator_bundle_publish_failures_total` | counter | `reason` | Bundles not published: `too_large` (policy changes wait until it fits), `error` (retried). Leader only. |
+| `inkwall_operator_bundle_publish_failures_total` | counter | `reason` | Bundles not published: `too_large` (the bundle with every change is over 7,200 KiB compressed or 64 MiB raw: the bundle published holds back changes, namespace by namespace, until it fits), `error` (retried). Leader only. |
+| `inkwall_operator_bundle_held_policies` | gauge | | Policies and rule sets the published bundle holds back at their previous version, or leaves out (`Accepted=False`, `BundleTooLarge`): their namespace would be over its share of the bundle (`spec.bundle.namespaceShare`), the bundle with them over 7,200 KiB compressed or 64 MiB raw, or namespaces' changes would grow it into the cluster reserve (`spec.bundle.clusterReserve`); and ClusterWAFRuleSets whose change isn't published. 0 when every change is published. Leader only. |
+| `inkwall_operator_bundle_namespace_share_percent` | gauge | `policy_namespace` | The share of the published bundle's size limit a namespace's content takes, in percent of the limit it takes most of, for the namespaces over `spec.bundle.namespaceShare` only: no series for the others, or with one namespace, so at most a few. A compressed share is measured for at most 16 namespaces, the largest first, and the gauge at most every 10 minutes, unless the share changes. The label isn't `namespace`, which Prometheus sets to the operator's. Leader only. |
 | `inkwall_operator_events_forwarded_total` | counter | | Security events sent to the control plane. |
 | `inkwall_operator_events_buffered` | gauge | | Security events buffered for the control plane. |
 | `inkwall_operator_events_buffer_errors_total` | counter | | Batches of events that couldn't be written to the buffer. |
@@ -328,9 +333,57 @@ say why in `Programmed=False`, reason `WiringFailed`:
 
 ### InkwallBundleNearSizeLimit
 
-The bundle is over 80% of the 7,200 KiB it can be, compressed. Past it, policy changes can't be
-published (`Accepted=False`, `BundleTooLarge`). Rules written inline in many policies are the
-usual cause: put shared rules in one rule set the policies reference.
+The bundle has been over 80% of a size limit for 10 minutes: 7,200 KiB compressed, or 64 MiB raw
+(`inkwall_operator_bundle_raw_bytes`). Changes are still published, but once the bundle with every
+change would leave less than `spec.bundle.namespaceShare` of the `InkwallConfig` (25% by default)
+of a limit free, a namespace's changes that grow its measured share of the bundle past that share
+are held back (never with one namespace, or in a first bundle that fits). Namespaces' changes that
+would grow the bundle into `spec.bundle.clusterReserve` (10% of each limit by default) are held
+back too: that room is kept for ClusterWAFRuleSet changes, such as a CRS upgrade, which may use it.
+Past the limit, or the reserve, changes are held back namespace by namespace until it fits, the
+namespace with the largest share first, cluster rule sets after every namespace. Held policies keep their previous version, or
+are left out when new, held rule sets ship as they were, and both report `Accepted=False`,
+`BundleTooLarge`, with the namespace's share; every other change is still published, and nothing
+published is taken out. [InkwallBundleChangesHeld](#inkwallbundlechangesheld) fires while changes
+are held. Rules written inline in many policies are the usual cause: put shared rules in one rule
+set the policies reference.
+
+### InkwallBundleChangesHeld
+
+For 5 minutes, the published bundle has held back policy or rule set changes, or left out policies
+because of them (`inkwall_operator_bundle_held_policies`): engines enforce their previous version,
+or don't have them when new or left out. A policy is left out when its previous version, or its
+rule set as it was, doesn't compile with a ClusterWAFRuleSet as it is now (a rule id a CRS upgrade
+adds, say): that happens only to a namespace held over its share, measured, or whose change doesn't
+fit the size limits even alone, with that ClusterWAFRuleSet's change, on the bundle in force, or in
+the last resort. Another namespace's change, which adopts the ClusterWAFRuleSet's, is released
+before every other namespace's change and may take part of the cluster reserve (4% of each limit,
+for all such changes together) if it grows the namespace's share by at most 4% of each limit; a
+larger change isn't released first and may not grow the bundle into the reserve. If such changes
+don't all fit, the ClusterWAFRuleSet's change waits one build, while those that fit are published
+and the other namespaces' changes wait with it (two builds at most per ClusterWAFRuleSet change).
+It never waits two builds in a row that way, so then a policy of a namespace still held is left
+out; the adopting changes that waited are released first then, and share another 4% of each limit
+of the reserve.
+`kubectl get wafpolicies,wafrulesets,clusterwafrulesets -A` shows them with `Accepted=False`, reason
+`BundleTooLarge`; the message says whether the namespace is over its share of the bundle
+(`spec.bundle.namespaceShare`), the bundle with them is over its limit, or namespaces' changes would
+grow it into the cluster reserve (`spec.bundle.clusterReserve`), and how much the namespace takes. Shrink that namespace's policies or rule sets. Raising
+`spec.bundle.namespaceShare` lets one namespace take more of the bundle, and so leaves less room
+for the others' changes; lowering `spec.bundle.clusterReserve` gives the namespaces the room kept for
+cluster rule sets.
+
+### InkwallNamespaceOverShare
+
+For 30 minutes, a namespace's content has taken more of the published bundle than its share,
+`spec.bundle.namespaceShare` of the `InkwallConfig` (25% of a size limit by default;
+`inkwall_operator_bundle_namespace_share_percent`, labeled `policy_namespace`). The share holds
+back only a namespace's changes that grow it while the bundle is near full, and never takes out
+what was published: a namespace can get there while there was room, or before the share applied.
+Such a namespace leaves less room for every other namespace's changes, and for a CRS upgrade beyond
+the cluster reserve. Find out why it is so large (`kubectl get wafrulesets,wafpolicies -n
+<namespace>`), and shrink it: shared inline rules belong in one rule set the policies reference. A
+cluster with few, large namespaces can raise `spec.bundle.namespaceShare` instead.
 
 ### InkwallGeoDatabaseStale
 

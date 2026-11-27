@@ -3,10 +3,11 @@
 
 # Nightly stress run (#395): the packages whose tests have flaked on timing,
 # with the race detector, shuffled, 10 times, on GOMAXPROCS=2 with CPU hogs
-# alongside (make stress-test). Each job prints its shuffle seed first:
-# rerun a failure with SEED=<it> COUNT=1 STRESS_PACKAGES=<package> make
-# stress-test. A failing scheduled run opens an issue
-# (hack/ci/report-scheduled.sh).
+# alongside (make stress-test). Each job prints its shuffle seed first, and
+# the first scenario of the bundle fit property test, random unless given:
+# rerun a failure with SEED=<it> INKWALL_FIT_SEED_BASE=<it> COUNT=1
+# STRESS_PACKAGES=<package> make stress-test. A failing scheduled run opens
+# an issue (hack/ci/report-scheduled.sh).
 name: stress
 
 on:
@@ -17,6 +18,9 @@ on:
       count:
         description: Runs of each test
         default: "10"
+      fit_seed_base:
+        description: First scenario of the bundle fit property test (random if empty)
+        default: ""
 
 # Each job asks for what it needs (least privilege).
 permissions: {}
@@ -51,6 +55,7 @@ jobs:
         env:
           PACKAGES: ${{ matrix.packages }}
           COUNT: ${{ inputs.count || '10' }}
+          INKWALL_FIT_SEED_BASE: ${{ inputs.fit_seed_base }}
 
   report:
     needs: stress
@@ -67,7 +72,7 @@ jobs:
       - run: |
           failed=$(gh run view "$GITHUB_RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | .name' | paste -sd, - | sed 's/,/, /g')
           detail=
-          [[ -n $failed ]] && detail="Failing: $failed. Each job's log starts with its shuffle seed; rerun with SEED=<it> COUNT=1 STRESS_PACKAGES=<package> make stress-test, and file or fix the flake."
+          [[ -n $failed ]] && detail="Failing: $failed. Each job's log starts with its shuffle seed and fit seed base; rerun with SEED=<it> INKWALL_FIT_SEED_BASE=<it> COUNT=1 STRESS_PACKAGES=<package> make stress-test, and file or fix the flake."
           hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$RESULT" "$RUN_URL" "$detail"
         env:
           GH_TOKEN: ${{ github.token }}
