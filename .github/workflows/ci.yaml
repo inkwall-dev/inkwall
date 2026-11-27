@@ -40,6 +40,8 @@ jobs:
           go-version: '1.27.x'
           check-latest: true
       - run: make test
+      # The bundle-size tests that -race skips or shrinks (full size, 200 scenarios).
+      - run: make test-norace
       # Operator scale with fake engines (0004 §8), at a small size; the
       # full matrix runs on demand: make scale-test SCALE=full.
       - run: make scale-test SCALE_CHANGES=5
