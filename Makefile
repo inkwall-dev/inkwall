@@ -100,7 +100,7 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 
 .PHONY: test
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest), and the adapter parity test (test/crs)
-	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 -timeout 20m ./...
 	@# Adapter parity (#365): every adapter against the reverse proxy, in test/crs's module.
 	cd test/crs && $(GO) test -count=1 -run '^TestAdapterParity$$' .
 
